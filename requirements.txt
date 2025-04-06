@@ -1,3 +1,7 @@
 sqlglot
 natsort 
 setuptools
+requests
+ipython
+pillow
+matplotlib

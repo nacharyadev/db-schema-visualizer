@@ -17,15 +17,40 @@ This Python console application processes Flyway SQL files to evaluate and outpu
    pip install -r requirements.txt
    ```
 
-## Usage
+## How to Run the App
 
-Run the application using the `python flyway_schema_visualizer.py` command followed by the path to the directory containing your SQL files:
+To run the Flyway Schema Visualizer app, use the following command:
 
-```bash
-python flyway_schema_visualizer.py ./sample_data/users
+```
+python flyway_schema_visualizer.py <directory_path> [options]
 ```
 
-This will process all `.sql` files in the specified directory and output the final database schema in SQL format.
+### Arguments
+
+- `<directory_path>`: The path to the directory containing the Flyway SQL migration files.
+
+### Options
+
+- `-d`, `--dialect`: Specify the SQL dialect for parsing (e.g., `postgres`, `mysql`, `sqlite`). Default is `postgres`.
+- `-o`, `--output`: Optional file path to write the final schema output.
+- `--format`: Specify the output format for the schema. Options are `text` or `mermaid`. Default is `text`.
+- `--help`: Show a help message and exit.
+
+### Example Usage
+
+To generate a schema in text format:
+
+```
+python flyway_schema_visualizer.py /path/to/sql/files --format text
+```
+
+To generate a schema in Mermaid format and save it to a file:
+
+```
+python flyway_schema_visualizer.py /path/to/sql/files --format mermaid -o schema.mmd
+```
+
+This will process the SQL files in the specified directory and output the final database schema in the chosen format.
 
 ## Development
 

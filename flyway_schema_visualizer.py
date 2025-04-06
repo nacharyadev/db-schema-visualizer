@@ -1,16 +1,146 @@
 import argparse
-import os
 import re
 from pathlib import Path
 from natsort import natsorted, ns # ns for natural sort options
 import sqlglot
 from sqlglot import exp # To easily check expression types like exp.CreateTable
+import base64
+import io, requests
+from IPython.display import Image, display
+from PIL import Image as im
+import matplotlib.pyplot as plt
 
 # --- Configuration ---
 # Attempt to guess dialect, but can be overridden via command line
 DEFAULT_SQL_DIALECT = 'postgres' # Common dialects: 'mysql', 'postgres', 'sqlite', 'tsql' (SQL Server)
 
-# --- Helper Functions ---
+# --- Helper function for Mermaid ---
+
+def plot_mermaid_visual(graph):
+    graphbytes = graph.encode("utf8")
+    base64_bytes = base64.urlsafe_b64encode(graphbytes)
+    base64_string = base64_bytes.decode("ascii")
+    img = im.open(io.BytesIO(requests.get('https://mermaid.ink/img/' + base64_string).content))
+    plt.imshow(img)
+    plt.axis('off') # allow to hide axis
+    plt.savefig('image.png', dpi=1200)
+
+def parse_foreign_key(constraint_sql):
+    """
+    Parses a FOREIGN KEY constraint string to extract relevant info for Mermaid.
+    Returns a tuple: (child_columns_list, referenced_table) or None if parsing fails.
+    Example: FOREIGN KEY (author_id) REFERENCES users(id) -> (['author_id'], 'users')
+             FOREIGN KEY (col_a, col_b) REFERENCES other_table -> (['col_a', 'col_b'], 'other_table')
+    NOTE: This is a simplified parser, assumes standard syntax.
+    """
+    # Regex breakdown:
+    # FOREIGN KEY\s*\((.*?)\)       # Capture column(s) inside parentheses after FOREIGN KEY
+    # \s*REFERENCES\s*              # Match REFERENCES keyword
+    # (\w+)                         # Capture the referenced table name (simple word)
+    # (?:\s*\(.*?\))?                # Optionally match referenced columns (non-capturing)
+    # (?:\s+ON\s+(?:DELETE|UPDATE).*)* # Optionally match ON DELETE/UPDATE clauses (non-capturing)
+    match = re.search(
+        r"FOREIGN KEY\s*\((.*?)\)\s*REFERENCES\s*(\w+)(?:\s*\(.*?\))?(?:\s+ON\s+(?:DELETE|UPDATE).*)*",
+        constraint_sql,
+        re.IGNORECASE
+    )
+    if match:
+        child_cols_str = match.group(1)
+        referenced_table = match.group(2)
+        # Split columns, remove potential quotes and whitespace
+        child_columns = [col.strip().strip('`"') for col in child_cols_str.split(',')]
+        return child_columns, referenced_table.strip('`"')
+    return None
+
+# --- Function to generate Mermaid code ---
+
+def format_schema_mermaid(schema_dict):
+    """Generates Mermaid ER diagram code from the schema dictionary."""
+    output = ["erDiagram"]
+    relationships = []
+    foreign_key_columns = {} # Store FK columns for marking: {'table': {'col1', 'col2'}}
+
+    # --- Pass 1: Identify all Foreign Key columns ---
+    for table_name, table_info in schema_dict.get('tables', {}).items():
+        if table_name not in foreign_key_columns:
+            foreign_key_columns[table_name] = set()
+
+        for constraint in table_info.get('constraints', []):
+            parsed_fk = parse_foreign_key(constraint)
+            if parsed_fk:
+                child_columns, _ = parsed_fk
+                for col in child_columns:
+                     foreign_key_columns[table_name].add(col) # Mark column as FK
+
+    # --- Pass 2: Generate Table Definitions and Collect Relationships ---
+    sorted_table_names = sorted(schema_dict.get('tables', {}).keys())
+
+    for table_name in sorted_table_names:
+        table_info = schema_dict['tables'][table_name]
+        output.append(f"    {table_name} {{")
+
+        if not table_info.get('columns'):
+            output.append("        # (No columns defined)") # Mermaid comment
+        else:
+            sorted_col_names = sorted(table_info['columns'].keys())
+            for col_name in sorted_col_names:
+                col_info = table_info['columns'][col_name]
+                col_type = col_info.get('type', 'UNKNOWN').replace(" ", "_") # Replace spaces in type for Mermaid ID safety
+                col_constraints = col_info.get('constraints', [])
+
+                markers = []
+                is_pk = any("PRIMARY KEY" in c.upper() for c in col_constraints)
+                is_nn = any("NOT NULL" in c.upper() for c in col_constraints)
+                is_uk = any("UNIQUE" in c.upper() for c in col_constraints)
+                # Check if this column was marked as an FK in Pass 1
+                is_fk = col_name in foreign_key_columns.get(table_name, set())
+
+                if is_pk: markers.append("PK")
+                if is_fk: markers.append("FK")
+                if is_uk: markers.append("UK")
+                if is_nn: markers.append("NN")
+
+                marker_str = f" \"{','.join(markers)}\"" if markers else ""
+                # Escape quotes in column names/types if necessary, though unlikely needed for standard names
+                output.append(f"        {col_type} {col_name}{marker_str}")
+
+        output.append("    }")
+        output.append("") # Blank line for readability
+
+        # Process constraints for relationships
+        for constraint in table_info.get('constraints', []):
+             parsed_fk = parse_foreign_key(constraint)
+             if parsed_fk:
+                 child_columns, referenced_table = parsed_fk
+                 if referenced_table in schema_dict.get('tables', {}): # Ensure referenced table exists
+                     # Determine cardinality (simplified: check nullability of the first FK column)
+                     first_child_col = child_columns[0]
+                     child_col_info = table_info.get('columns', {}).get(first_child_col)
+                     child_col_constraints = child_col_info.get('constraints', []) if child_col_info else []
+                     is_child_nn = any("NOT NULL" in c.upper() for c in child_col_constraints)
+
+                     # ||--|{ : one to one-or-more (FK is NOT NULL)
+                     # ||--o{ : one to zero-or-more (FK is NULLABLE)
+                     # Other cardinality like zero-or-one requires more info (e.g., UNIQUE constraint on FK)
+                     # Defaulting to one-to-many type relationships
+                     cardinality = "||--|{" if is_child_nn else "||--o{"
+
+                     # Use first child column name in label for clarity (optional)
+                     label = f"\"FK: {first_child_col}\"" # Use quotes for labels with spaces/special chars
+                     relationships.append(f"    {referenced_table} {cardinality} {table_name} : {label}")
+                 else:
+                      print(f"Warning: Skipping relationship for constraint '{constraint}' because referenced table '{referenced_table}' was not found in the final schema.")
+
+
+    # Append relationships at the end
+    if relationships:
+        output.append("    %% -- Relationships --") # Mermaid comment
+        # Add unique relationships only to avoid duplicates if defined multiple ways
+        output.extend(sorted(list(set(relationships))))
+
+    return "\n".join(output)
+
+# --- Helper Functions for Flyway --- 
 
 def parse_flyway_version(filename):
     """
@@ -359,6 +489,12 @@ def main():
         default=None,
         help="Optional file path to write the final schema output."
         )
+    parser.add_argument(
+        "--format", # Add format argument
+        choices=['text', 'mermaid'],
+        default='text',
+        help="Output format for the schema."
+    )
 
     args = parser.parse_args()
 
@@ -378,8 +514,19 @@ def main():
 
     final_schema = process_sql_scripts(script_dir, args.dialect)
     schema_output = format_schema_output(final_schema)
-
     print("\n" + schema_output) # Print to console
+
+    # Choose the formatting function based on the argument
+    if args.format == 'mermaid':
+        schema_output = format_schema_mermaid(final_schema)
+        print("\n --- Mermaid schema output ---")
+        print("\n" + schema_output)
+        #TODO plot_mermaid_visual(schema_output)
+        # Suggest using a .md or .mmd extension for Mermaid files
+        if args.output and not Path(args.output).suffix.lower() in ['.md', '.mmd']:
+            print(f"Suggestion: Consider using a '.md' or '.mmd' extension for Mermaid output file '{args.output}'.")
+        elif not args.output:
+            args.output = args.directory + "/output_schema.mmd"
 
     if args.output:
         output_file = Path(args.output)

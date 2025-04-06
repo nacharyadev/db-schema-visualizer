@@ -24,3 +24,5 @@ yarn-error.log*
 
 .venv
 dbviz.egg-info
+*.mmd
+__pycache__
